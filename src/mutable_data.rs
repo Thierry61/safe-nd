@@ -569,87 +569,94 @@ impl SeqData {
     /// Mutates entries (key + value pairs) in bulk.
     ///
     /// Returns `Err(InvalidEntryActions)` if the mutation parameters are invalid.
-    pub fn mutate_entries(&mut self, actions: SeqEntryActions, requester: PublicKey) -> Result<()> {
-        // Deconstruct actions into inserts, updates, and deletes
-        let (insert, update, delete) = actions.actions.into_iter().fold(
-            (BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
-            |(mut insert, mut update, mut delete), (key, item)| {
-                match item {
-                    SeqEntryAction::Ins(value) => {
-                        let _ = insert.insert(key, value);
-                    }
-                    SeqEntryAction::Update(value) => {
-                        let _ = update.insert(key, value);
-                    }
-                    SeqEntryAction::Del(version) => {
-                        let _ = delete.insert(key, version);
-                    }
-                };
-                (insert, update, delete)
-            },
-        );
-
-        if *self.owner() != requester
-            && ((!insert.is_empty() && !self.is_action_allowed(&requester, Action::Insert))
-                || (!update.is_empty() && !self.is_action_allowed(&requester, Action::Update))
-                || (!delete.is_empty() && !self.is_action_allowed(&requester, Action::Delete)))
-        {
-            return Err(Error::AccessDenied);
-        }
-
+    pub fn mutate_entries(&mut self, actions: EntryActions, requester: PublicKey) -> Result<()> {
         let mut new_data = self.data.clone();
         let mut errors = BTreeMap::new();
 
-        for (key, val) in insert {
-            match new_data.entry(key) {
-                Entry::Occupied(entry) => {
-                    let _ = errors.insert(
-                        entry.key().clone(),
-                        EntryError::EntryExists(entry.get().version as u8),
-                    );
-                }
-                Entry::Vacant(entry) => {
-                    let _ = entry.insert(val);
-                }
-            }
-        }
+        match actions {
+            EntryActions::Seq(actions) => {
+                // Deconstruct actions into inserts, updates, and deletes
+                let (insert, update, delete) = actions.actions.into_iter().fold(
+                    (BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
+                    |(mut insert, mut update, mut delete), (key, item)| {
+                        match item {
+                            SeqEntryAction::Ins(value) => {
+                                let _ = insert.insert(key, value);
+                            }
+                            SeqEntryAction::Update(value) => {
+                                let _ = update.insert(key, value);
+                            }
+                            SeqEntryAction::Del(version) => {
+                                let _ = delete.insert(key, version);
+                            }
+                        };
+                        (insert, update, delete)
+                    },
+                );
 
-        for (key, val) in update {
-            match new_data.entry(key) {
-                Entry::Occupied(mut entry) => {
-                    let current_version = entry.get().version;
-                    if val.version == current_version + 1 {
-                        let _ = entry.insert(val);
-                    } else {
-                        let _ = errors.insert(
-                            entry.key().clone(),
-                            EntryError::InvalidSuccessor(current_version as u8),
-                        );
+                if *self.owner() != requester
+                    && ((!insert.is_empty() && !self.is_action_allowed(&requester, Action::Insert))
+                        || (!update.is_empty() && !self.is_action_allowed(&requester, Action::Update))
+                        || (!delete.is_empty() && !self.is_action_allowed(&requester, Action::Delete)))
+                {
+                    return Err(Error::AccessDenied);
+                }
+
+                for (key, val) in insert {
+                    match new_data.entry(key) {
+                        Entry::Occupied(entry) => {
+                            let _ = errors.insert(
+                                entry.key().clone(),
+                                EntryError::EntryExists(entry.get().version as u8),
+                            );
+                        }
+                        Entry::Vacant(entry) => {
+                            let _ = entry.insert(val);
+                        }
                     }
                 }
-                Entry::Vacant(entry) => {
-                    let _ = errors.insert(entry.key().clone(), EntryError::NoSuchEntry);
-                }
-            }
-        }
 
-        for (key, version) in delete {
-            match new_data.entry(key.clone()) {
-                Entry::Occupied(entry) => {
-                    let current_version = entry.get().version;
-                    if version == current_version + 1 {
-                        let _ = new_data.remove(&key);
-                    } else {
-                        let _ = errors.insert(
-                            entry.key().clone(),
-                            EntryError::InvalidSuccessor(current_version as u8),
-                        );
+                for (key, val) in update {
+                    match new_data.entry(key) {
+                        Entry::Occupied(mut entry) => {
+                            let current_version = entry.get().version;
+                            if val.version == current_version + 1 {
+                                let _ = entry.insert(val);
+                            } else {
+                                let _ = errors.insert(
+                                    entry.key().clone(),
+                                    EntryError::InvalidSuccessor(current_version as u8),
+                                );
+                            }
+                        }
+                        Entry::Vacant(entry) => {
+                            let _ = errors.insert(entry.key().clone(), EntryError::NoSuchEntry);
+                        }
                     }
                 }
-                Entry::Vacant(entry) => {
-                    let _ = errors.insert(entry.key().clone(), EntryError::NoSuchEntry);
+
+                for (key, version) in delete {
+                    match new_data.entry(key.clone()) {
+                        Entry::Occupied(entry) => {
+                            let current_version = entry.get().version;
+                            if version == current_version + 1 {
+                                let _ = new_data.remove(&key);
+                            } else {
+                                let _ = errors.insert(
+                                    entry.key().clone(),
+                                    EntryError::InvalidSuccessor(current_version as u8),
+                                );
+                            }
+                        }
+                        Entry::Vacant(entry) => {
+                            let _ = errors.insert(entry.key().clone(), EntryError::NoSuchEntry);
+                        }
+                    }
                 }
-            }
+            },
+            EntryActions::Unseq(_actions) => {
+                unimplemented!();
+            },
         }
 
         if !errors.is_empty() {
@@ -895,9 +902,8 @@ impl Data {
     pub fn mutate_entries(&mut self, actions: EntryActions, requester: PublicKey) -> Result<()> {
         match self {
             Data::Seq(data) => {
-                if let EntryActions::Seq(actions) = actions {
-                    return data.mutate_entries(actions, requester);
-                }
+                // SeqData handles both sequenced and unsequenced actions
+                return data.mutate_entries(actions, requester);
             }
             Data::Unseq(data) => {
                 if let EntryActions::Unseq(actions) = actions {

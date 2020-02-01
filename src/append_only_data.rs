@@ -479,7 +479,7 @@ pub trait SeqAppendOnly {
     /// Returns an error if duplicate entries are present.
     /// If the specified `last_entries_index` does not match the last recorded entries index, an
     /// error will be returned.
-    fn append(&mut self, entries: Entries, last_entries_index: u64) -> Result<()>;
+    fn append(&mut self, entries: Entries, last_entries_index: Option<u64>) -> Result<()>;
 }
 
 macro_rules! impl_appendable_data {
@@ -774,11 +774,13 @@ impl<P> SeqAppendOnly for SeqData<P>
 where
     P: Perm + Hash + Clone,
 {
-    fn append(&mut self, mut entries: Entries, last_entries_index: u64) -> Result<()> {
+    fn append(&mut self, mut entries: Entries, last_entries_index: Option<u64>) -> Result<()> {
         check_dup(&self.inner.data, entries.as_mut())?;
 
-        if last_entries_index != self.inner.data.len() as u64 {
-            return Err(Error::InvalidSuccessor(self.inner.data.len() as u64));
+        if let Some(last_entries_index) = last_entries_index {
+            if last_entries_index != self.inner.data.len() as u64 {
+                return Err(Error::InvalidSuccessor(self.inner.data.len() as u64));
+            }
         }
 
         self.inner.data.extend(entries);
@@ -1159,20 +1161,21 @@ impl Data {
     /// Returns an error if duplicate entries are present or the data is not sequenced.
     pub fn append_seq(&mut self, entries: Entries, last_entries_index: u64) -> Result<()> {
         match self {
-            Data::PubSeq(data) => data.append(entries, last_entries_index),
-            Data::UnpubSeq(data) => data.append(entries, last_entries_index),
+            Data::PubSeq(data) => data.append(entries, Some(last_entries_index)),
+            Data::UnpubSeq(data) => data.append(entries, Some(last_entries_index)),
             _ => Err(Error::InvalidOperation),
         }
     }
 
     /// Appends new entries.
     ///
-    /// Returns an error if duplicate entries are present or the data is not unsequenced.
+    /// Returns an error if duplicate entries are present.
     pub fn append_unseq(&mut self, entries: Entries) -> Result<()> {
         match self {
             Data::PubUnseq(data) => data.append(entries),
             Data::UnpubUnseq(data) => data.append(entries),
-            _ => Err(Error::InvalidOperation),
+            Data::PubSeq(data) => data.append(entries, None),
+            Data::UnpubSeq(data) => data.append(entries, None),
         }
     }
 
@@ -1452,7 +1455,7 @@ mod tests {
     #[test]
     fn seq_append_entries() {
         let mut data = SeqData::<PubPermissions>::new(XorName([1; 32]), 10000);
-        unwrap!(data.append(vec![Entry::new(b"hello".to_vec(), b"world".to_vec())], 0));
+        unwrap!(data.append(vec![Entry::new(b"hello".to_vec(), b"world".to_vec())], Some(0)));
     }
 
     #[test]
@@ -1536,7 +1539,7 @@ mod tests {
         ];
         assert_eq!(
             Error::DuplicateEntryKeys,
-            unwrap_err!(data.append(entries, 0))
+            unwrap_err!(data.append(entries, Some(0)))
         );
 
         // Assert that the entries are appended because there are no duplicate keys.
@@ -1544,18 +1547,18 @@ mod tests {
             Entry::new(b"KEY1".to_vec(), b"VALUE1".to_vec()),
             Entry::new(b"KEY2".to_vec(), b"VALUE2".to_vec()),
         ];
-        unwrap!(data.append(entries1, 0));
+        unwrap!(data.append(entries1, Some(0)));
 
         // Assert that entries are not appended because they duplicate some keys appended previously.
         let entries2 = vec![Entry::new(b"KEY2".to_vec(), b"VALUE2".to_vec())];
         assert_eq!(
             Error::KeysExist(entries2.clone()),
-            unwrap_err!(data.append(entries2, 2))
+            unwrap_err!(data.append(entries2, Some(2)))
         );
 
         // Assert that no duplicate keys are present and the append operation is successful.
         let entries3 = vec![Entry::new(b"KEY3".to_vec(), b"VALUE3".to_vec())];
-        unwrap!(data.append(entries3, 2));
+        unwrap!(data.append(entries3, Some(2)));
     }
 
     #[test]
@@ -1565,7 +1568,7 @@ mod tests {
             Entry::new(b"key0".to_vec(), b"value0".to_vec()),
             Entry::new(b"key1".to_vec(), b"value1".to_vec()),
         ];
-        unwrap!(data.append(entries, 0));
+        unwrap!(data.append(entries, Some(0)));
 
         assert_eq!(
             data.in_range(Index::FromStart(0), Index::FromStart(0)),
